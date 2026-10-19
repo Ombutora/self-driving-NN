@@ -250,7 +250,7 @@ class App:
         pygame.init(); pygame.display.set_caption('NeuroEvolution • Self-Driving Lab')
         self.screen=pygame.display.set_mode((W,H)); self.clock=pygame.time.Clock(); self.font=pygame.font.SysFont('consolas',16); self.big=pygame.font.SysFont('consolas',22,bold=True)
         self.running=True; self.paused=False; self.show_sensors=False; self.generation=0; self.generation_best=0; self.best_ever=0; self.best_genome=None; self.cars=[]; self.history=[]
-        self.config_path=config_path; self.best_time=None
+        self.config_path=config_path; self.best_time=None; self.replay=False
 
     def save_checkpoint(self):
         with open(OUT/'neat-checkpoint.pkl','wb') as f: pickle.dump({'generation':self.generation,'history':self.history,'best_ever':self.best_ever,'best_genome':self.best_genome},f)
@@ -261,13 +261,18 @@ class App:
         for c in cars: c.draw(self.screen,self.show_sensors and c.alive)
         panel=pygame.Rect(W-285,515,265,192); pygame.draw.rect(self.screen,(24,29,39),panel,border_radius=10); pygame.draw.rect(self.screen,(55,64,78),panel,1,border_radius=10)
         best_time=f'{self.best_time:.1f}s' if self.best_time is not None else '-'
-        lines=[('NEUROEVOLUTION LAB',WHITE), (f'Generation: {self.generation}',WHITE),(f'Cars alive: {sum(c.alive for c in cars)}/{len(cars)}',GREEN),(f'Generation best: {self.generation_best:.1f}',YELLOW),(f'Best ever: {self.best_ever:.1f}',BLUE),(f'Fastest {TARGET_LAPS} laps: {best_time}',BLUE),('SPACE pause  |  S save',MUTED),('N sensors  |  ESC quit',MUTED)]
+        if self.replay:
+            car=cars[0]
+            lines=[('REPLAY • BEST GENOME',WHITE),(f'Run: {self.generation}',WHITE),(f'Lap: {min(car.laps+1,TARGET_LAPS)}/{TARGET_LAPS}',GREEN),(f'Time: {car.age/60:.1f}s',YELLOW),(f'Speed: {car.speed:.2f}',BLUE),(f'Best {TARGET_LAPS}-lap time: {best_time}',BLUE),('SPACE pause  |  N sensors',MUTED),('ESC quit',MUTED)]
+        else:
+            lines=[('NEUROEVOLUTION LAB',WHITE), (f'Generation: {self.generation}',WHITE),(f'Cars alive: {sum(c.alive for c in cars)}/{len(cars)}',GREEN),(f'Generation best: {self.generation_best:.1f}',YELLOW),(f'Best ever: {self.best_ever:.1f}',BLUE),(f'Fastest {TARGET_LAPS} laps: {best_time}',BLUE),('SPACE pause  |  S save',MUTED),('N sensors  |  ESC quit',MUTED)]
         for i,(txt,col) in enumerate(lines): self.screen.blit(self.font.render(txt,True,col),(panel.x+12,panel.y+10+i*22))
         genome=self.best_genome
-        if cars:
+        if cars and not self.replay:
             livebest=max(cars,key=lambda c:c.fitness)
             if genome is None or livebest.fitness>=self.generation_best: genome=livebest.genome
         if genome is not None: draw_network(self.screen,genome,config,(W-285,18,265,290),self.font)
+        elif self.replay: draw_network(self.screen,cars[0].genome,config,(W-285,18,265,290),self.font)
         # Compact fitness plot from saved history.
         plot=pygame.Rect(W-285,322,265,180); pygame.draw.rect(self.screen,(24,29,39),plot,border_radius=8); pygame.draw.rect(self.screen,(55,64,78),plot,1,border_radius=8)
         self.screen.blit(self.font.render('FITNESS HISTORY',True,WHITE),(plot.x+12,plot.y+10))
@@ -283,6 +288,36 @@ class App:
         pygame.display.flip()
 
 
+def replay(genome_path, config):
+    # Watch a saved genome drive on its own; the run restarts whenever the car finishes or crashes.
+    with open(genome_path,'rb') as f: genome=pickle.load(f)
+    app=App(ROOT/'neat_config.txt'); app.replay=True; app.show_sensors=True; app.best_genome=genome
+    net=neat.nn.FeedForwardNetwork.create(genome,config)
+    history_path=Path(genome_path).parent/'fitness_history.csv'
+    if history_path.exists():
+        with open(history_path,newline='') as f: app.history=[(int(r[0]),float(r[1]),float(r[2])) for r in list(csv.reader(f))[1:]]
+    print(f'Replaying {genome_path}  (fitness {genome.fitness})')
+    while app.running:
+        app.generation += 1
+        car=Car(0,genome,net); car.color=YELLOW
+        while car.alive and app.running:
+            app.clock.tick(FPS)
+            for event in pygame.event.get():
+                if event.type==pygame.QUIT: app.running=False
+                elif event.type==pygame.KEYDOWN:
+                    if event.key==pygame.K_ESCAPE: app.running=False
+                    elif event.key==pygame.K_SPACE: app.paused=not app.paused
+                    elif event.key==pygame.K_n: app.show_sensors=not app.show_sensors
+            if not app.paused: car.update()
+            app.draw([car],config)
+        if car.finished:
+            app.best_time=min(app.best_time or car.age/60, car.age/60)
+            print(f'Run {app.generation}: finished {TARGET_LAPS} laps in {car.age/60:.1f}s')
+        elif app.running:
+            print(f'Run {app.generation}: {"crashed" if car.age < MAX_FRAMES else "timed out"} on lap {car.laps+1} after {car.age/60:.1f}s')
+    pygame.quit()
+
+
 def build_config():
     config_path=ROOT/'neat_config.txt'
     if not config_path.exists(): raise FileNotFoundError(f'Missing config file: {config_path}')
@@ -292,8 +327,11 @@ def build_config():
 def main():
     parser=argparse.ArgumentParser(description='Neuroevolution self-driving simulation')
     parser.add_argument('--resume', type=str, default=None, help='Path to a NEAT checkpoint file in training/')
+    parser.add_argument('--replay', type=str, nargs='?', const=str(OUT/'best_genome.pkl'), default=None,
+                        help='Watch a saved genome drive (default: training/best_genome.pkl)')
     args=parser.parse_args()
     config=build_config()
+    if args.replay: return replay(args.replay, config)
     app=App(ROOT/'neat_config.txt')
     if args.resume:
         pop=neat.Checkpointer.restore_checkpoint(args.resume)
