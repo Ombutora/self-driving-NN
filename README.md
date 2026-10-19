@@ -12,12 +12,15 @@ No car is ever told how to drive. Each generation, every car is controlled by it
 |---|---|
 | **Inputs (8)** | Seven distance sensors fanned across the front of the car (±66°), each reading 0–1 of a 145 px range, plus the car's current speed. |
 | **Outputs (2)** | Steering (−1 left … +1 right) and throttle. |
-| **Fitness** | Distance travelled forward along the track centerline, plus a small bonus for each frame survived. Driving backwards is penalised. |
-| **Episode end** | A car is removed when it leaves the road or after 45 simulated seconds. The generation ends when every car is out. |
+| **Fitness** | Distance travelled forward along the track centerline, plus a small bonus for each frame survived. Driving backwards is penalised. Cars that finish get a **time bonus** for every frame left on the clock (see below). |
+| **Episode end** | A car's run ends when it completes 3 laps, leaves the road, or reaches 45 simulated seconds. The generation ends when every car is out. |
 | **Evolution** | NEAT with a population of 60. Networks start fully connected with no hidden nodes, and mutations add or remove nodes and connections over time. Species protect new structures so they have time to improve. |
 
 ### The track
 The track is a closed Catmull-Rom spline through the control points in `TRACK_POINTS` (top of `main.py`). It mixes long straights, S-bends and tight hairpins, so a car can't get round by holding one steering angle. It has to read its sensors and slow down for corners. Edit the points to design your own track.
+
+### Why the time bonus
+Without a finish line, the best cars soon drive flat out for the whole 45 seconds and hit the maximum possible score, so evolution stops improving. In one 236-generation run, best fitness stopped rising at generation 21. Now a run ends after `TARGET_LAPS` (3) laps, and finishers earn `TIME_BONUS` (2.0) fitness per frame they had left. A car that finishes faster scores higher, so there's always room to improve.
 
 ### Realism tweaks
 To keep driving from looking unnaturally perfect:
@@ -54,6 +57,17 @@ On macOS/Linux use `python3 -m venv .venv` and `source .venv/bin/activate`.
 | `ESC` | Quit |
 
 The dashboard shows the current best network (green = inputs, yellow = outputs, blue = hidden; blue/red links = positive/negative weights), a fitness-history chart, and live stats.
+
+## Watching the best driver
+
+Replay the saved champion without training:
+
+```powershell
+python main.py --replay                           # uses training/best_genome.pkl
+python main.py --replay path\to\some_genome.pkl   # or any other saved genome
+```
+
+A single car drives with its sensors shown. The panel shows the current lap, time, speed and best 3-lap time, and the run restarts whenever the car finishes or crashes. Controls: `SPACE` pause, `N` sensors, `ESC` quit.
 
 ## Outputs
 
