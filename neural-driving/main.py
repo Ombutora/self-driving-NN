@@ -27,6 +27,9 @@ SENSOR_NOISE = 0.02
 STEER_RESPONSE = 0.25
 CAR_LENGTH, CAR_WIDTH = 22, 13
 MAX_SPEED = 3.8
+MAX_FRAMES = 60*45          # time limit per run (45 s at 60 FPS)
+TARGET_LAPS = 3             # a run ends successfully after this many laps
+TIME_BONUS = 2.0            # fitness per frame left on the clock when a car finishes
 
 BG = (17, 21, 29); ROAD = (48, 55, 66); EDGE = (225, 230, 237)
 WHITE = (240, 243, 248); MUTED = (155, 166, 182); GREEN = (70, 220, 145)
@@ -86,6 +89,7 @@ class Car:
         self.progress_total = 0.0
         self.sensors = []
         self.fitness = 0.0
+        self.finished = False
         self.color = (80 + (genome_id*37)%150, 100 + (genome_id*53)%130, 150 + (genome_id*19)%100)
 
     def corners(self):
@@ -99,7 +103,6 @@ class Car:
         idx, offset = nearest_track(self.x, self.y)
         if offset > ROAD_WIDTH/2 - 7:
             self.alive = False
-            self.fitness = max(self.fitness, self.progress_total + self.age*0.01)
             return
         # Signed progress on the closed loop; ignore small backwards jitter.
         delta = idx - self.last_idx
@@ -122,7 +125,15 @@ class Car:
         self.y += math.sin(self.angle)*self.speed
         self.age += 1
         self.fitness = max(self.fitness, self.progress_total + self.age*0.01)
-        if self.age > 60*45: self.alive = False
+        if self.progress_total >= TARGET_LAPS*len(CENTERLINE):
+            # Finished: reward the frames left on the clock so faster drivers keep scoring higher.
+            self.finished = True; self.alive = False
+            self.fitness += TIME_BONUS*(MAX_FRAMES - self.age)
+        elif self.age >= MAX_FRAMES: self.alive = False
+
+    @property
+    def laps(self):
+        return max(0, int(self.progress_total // len(CENTERLINE)))
 
     def draw(self, screen, show_sensors=False):
         if not self.alive: return
@@ -219,6 +230,8 @@ def eval_genomes(genomes, config, app):
         app.generation_best=max(app.generation_best,best.fitness)
         if app.best_genome is None or best.fitness>=app.best_ever:
             app.best_genome=best.genome; app.best_ever=best.fitness
+        for c in cars:
+            if c.finished and (app.best_time is None or c.age/60 < app.best_time): app.best_time=c.age/60
         app.draw(cars,config)
     if cars:
         best=max(cars,key=lambda c:c.fitness)
@@ -226,7 +239,9 @@ def eval_genomes(genomes, config, app):
         app.history.append((app.generation,float(best.fitness),mean))
         with open(OUT/'best_genome.pkl','wb') as f: pickle.dump(app.best_genome,f)
         save_stats(app.history)
-        print(f"Generation {app.generation:4d} | best {best.fitness:8.1f} | mean {mean:8.1f} | alive {sum(c.alive for c in cars)}")
+        finished=[c.age/60 for c in cars if c.finished]
+        fastest=f'{min(finished):5.1f}s' if finished else '  -  '
+        print(f"Generation {app.generation:4d} | best {best.fitness:8.1f} | mean {mean:8.1f} | finished {len(finished):2d} | fastest {fastest}")
     if not app.running: raise KeyboardInterrupt
 
 
@@ -235,7 +250,7 @@ class App:
         pygame.init(); pygame.display.set_caption('NeuroEvolution • Self-Driving Lab')
         self.screen=pygame.display.set_mode((W,H)); self.clock=pygame.time.Clock(); self.font=pygame.font.SysFont('consolas',16); self.big=pygame.font.SysFont('consolas',22,bold=True)
         self.running=True; self.paused=False; self.show_sensors=False; self.generation=0; self.generation_best=0; self.best_ever=0; self.best_genome=None; self.cars=[]; self.history=[]
-        self.config_path=config_path
+        self.config_path=config_path; self.best_time=None
 
     def save_checkpoint(self):
         with open(OUT/'neat-checkpoint.pkl','wb') as f: pickle.dump({'generation':self.generation,'history':self.history,'best_ever':self.best_ever,'best_genome':self.best_genome},f)
@@ -244,8 +259,9 @@ class App:
     def draw(self,cars,config):
         self.screen.fill(BG); draw_track(self.screen)
         for c in cars: c.draw(self.screen,self.show_sensors and c.alive)
-        panel=pygame.Rect(W-285,515,265,170); pygame.draw.rect(self.screen,(24,29,39),panel,border_radius=10); pygame.draw.rect(self.screen,(55,64,78),panel,1,border_radius=10)
-        lines=[('NEUROEVOLUTION LAB',WHITE), (f'Generation: {self.generation}',WHITE),(f'Cars alive: {sum(c.alive for c in cars)}/{len(cars)}',GREEN),(f'Generation best: {self.generation_best:.1f}',YELLOW),(f'Best ever: {self.best_ever:.1f}',BLUE),('SPACE pause  |  S save',MUTED),('N sensors  |  ESC quit',MUTED)]
+        panel=pygame.Rect(W-285,515,265,192); pygame.draw.rect(self.screen,(24,29,39),panel,border_radius=10); pygame.draw.rect(self.screen,(55,64,78),panel,1,border_radius=10)
+        best_time=f'{self.best_time:.1f}s' if self.best_time is not None else '-'
+        lines=[('NEUROEVOLUTION LAB',WHITE), (f'Generation: {self.generation}',WHITE),(f'Cars alive: {sum(c.alive for c in cars)}/{len(cars)}',GREEN),(f'Generation best: {self.generation_best:.1f}',YELLOW),(f'Best ever: {self.best_ever:.1f}',BLUE),(f'Fastest {TARGET_LAPS} laps: {best_time}',BLUE),('SPACE pause  |  S save',MUTED),('N sensors  |  ESC quit',MUTED)]
         for i,(txt,col) in enumerate(lines): self.screen.blit(self.font.render(txt,True,col),(panel.x+12,panel.y+10+i*22))
         genome=self.best_genome
         if cars:
@@ -261,8 +277,8 @@ class App:
             for i,v in enumerate(vals):
                 px=plot.x+12+(plot.w-24)*(i/max(1,len(vals)-1)); py=plot.y+plot.h-18-(plot.h-52)*(v-lo)/span; pts.append((int(px),int(py)))
             if len(pts)>1: pygame.draw.lines(self.screen,GREEN,False,pts,2)
-            self.screen.blit(self.font.render(f'best {hi:.1f}',True,GREEN),(plot.x+12,plot.y+32))
-        self.screen.blit(self.font.render('Fitness rewards forward progress and survival.',True,MUTED),(18,H-28))
+            self.screen.blit(self.font.render(f'best {hi:.0f}',True,GREEN),(plot.right-12-self.font.size(f'best {hi:.0f}')[0],plot.y+10))
+        self.screen.blit(self.font.render('Score: progress + time bonus',True,MUTED),(W-280,H-38))
         if self.paused: self.screen.blit(self.big.render('PAUSED',True,YELLOW),(W//2-45,20))
         pygame.display.flip()
 
@@ -277,7 +293,8 @@ def main():
     parser=argparse.ArgumentParser(description='Neuroevolution self-driving simulation')
     parser.add_argument('--resume', type=str, default=None, help='Path to a NEAT checkpoint file in training/')
     args=parser.parse_args()
-    config=build_config(); app=App(ROOT/'neat_config.txt')
+    config=build_config()
+    app=App(ROOT/'neat_config.txt')
     if args.resume:
         pop=neat.Checkpointer.restore_checkpoint(args.resume)
         print(f'Resumed NEAT population from {args.resume}')
