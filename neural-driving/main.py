@@ -338,16 +338,18 @@ class App:
         pygame.display.flip()
 
 
-def replay(genome_path, config):
+def replay(genome_path, config, track_choice):
     # Watch a saved genome drive on its own; the run restarts whenever the car finishes or crashes.
     with open(genome_path,'rb') as f: genome=pickle.load(f)
     app=App(ROOT/'neat_config.txt'); app.replay=True; app.show_sensors=True; app.best_genome=genome
     net=neat.nn.FeedForwardNetwork.create(genome,config)
     history_path=Path(genome_path).parent/'fitness_history.csv'
     if history_path.exists(): app.history=load_history(history_path)
-    print(f'Replaying {genome_path} on the test track')
+    print(f'Replaying {genome_path} on {track_choice} track(s)')
     while app.running:
         app.generation += 1
+        if track_choice=='random': app.track=random_track(app.rng.randrange(10**6)); app.best_time=None
+        elif track_choice!='test': app.track=random_track(int(track_choice))
         car=Car(0,genome,net,app.track); car.color=YELLOW
         while car.alive and app.running:
             app.clock.tick(FPS)
@@ -371,9 +373,12 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='Path to a NEAT checkpoint file in training/')
     parser.add_argument('--replay', type=str, nargs='?', const=str(OUT/'best_genome.pkl'), default=None,
                         help='Watch a saved genome drive (default: training/best_genome.pkl)')
+    parser.add_argument('--track', type=str, default='test',
+                        help="Replay track: 'test' (default), 'random' (new track every run) or a number for a specific random track")
     args=parser.parse_args()
+    if args.track not in ('test','random') and not args.track.isdigit(): parser.error("--track must be 'test', 'random' or a number")
     config=build_config()
-    if args.replay: return replay(args.replay, config)
+    if args.replay: return replay(args.replay, config, args.track)
     app=App(ROOT/'neat_config.txt')
     if args.resume:
         pop=neat.Checkpointer.restore_checkpoint(args.resume)
