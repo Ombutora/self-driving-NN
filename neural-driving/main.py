@@ -2,8 +2,9 @@
 Run: python main.py
 """
 from __future__ import annotations
-import math, os, pickle, csv, time, argparse, random, functools
+import math, os, pickle, csv, time, argparse, random, functools, multiprocessing, signal
 from pathlib import Path
+os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')   # keep worker processes quiet
 import pygame
 import neat
 import numpy as np
@@ -229,7 +230,7 @@ def draw_network(screen, genome, config, rect, font):
 
 
 def save_stats(history):
-    import matplotlib; matplotlib.use('Agg')   # imported lazily; only needed when saving plots
+    import matplotlib; matplotlib.use('Agg')   # imported lazily so headless workers don't load it
     import matplotlib.pyplot as plt
     with open(OUT/'fitness_history.csv','w',newline='') as f:
         writer=csv.writer(f); writer.writerow(['generation','best_fitness','mean_fitness','test_fitness','test_result']); writer.writerows(history)
@@ -263,7 +264,7 @@ def drive(car):
     return car
 
 
-cached_track = functools.lru_cache(maxsize=8)(random_track)   # build each generation's tracks once, not per genome
+cached_track = functools.lru_cache(maxsize=8)(random_track)   # each worker builds a generation's tracks once
 
 
 def run_genome(genome, config, seeds):
@@ -280,7 +281,8 @@ def eval_genomes(genomes, config, app):
     finished=[]
     if app.headless:
         jobs=[(genome,config,seeds) for _,genome in genomes]
-        results=[run_genome(*job) for job in jobs]
+        # A timeout on get() keeps the wait interruptible, so Ctrl+C stops training promptly.
+        results=app.pool.starmap_async(run_genome,jobs).get(timeout=3600) if app.pool else [run_genome(*job) for job in jobs]
         for (_,genome),(fitness,times) in zip(genomes,results): genome.fitness=fitness; finished+=times
     else:
         nets={gid: neat.nn.FeedForwardNetwork.create(genome,config) for gid,genome in genomes}
@@ -313,8 +315,8 @@ def eval_genomes(genomes, config, app):
 
 
 class App:
-    def __init__(self, config_path, headless=False):
-        self.headless=headless
+    def __init__(self, config_path, headless=False, workers=1):
+        self.headless=headless; self.pool=multiprocessing.Pool(workers,initializer=signal.signal,initargs=(signal.SIGINT,signal.SIG_IGN)) if headless and workers>1 else None
         if not headless:
             pygame.init(); pygame.display.set_caption('NeuroEvolution • Self-Driving Lab')
             self.screen=pygame.display.set_mode((W,H)); self.clock=pygame.time.Clock(); self.font=pygame.font.SysFont('consolas',16); self.big=pygame.font.SysFont('consolas',22,bold=True)
@@ -394,12 +396,13 @@ def main():
     parser.add_argument('--track', type=str, default='test',
                         help="Replay track: 'test' (default), 'random' (new track every run) or a number for a specific random track")
     parser.add_argument('--headless', action='store_true', help='Train without a window or frame cap (much faster)')
+    parser.add_argument('--workers', type=int, default=os.cpu_count() or 1, help='CPU processes for --headless training (default: all cores)')
     args=parser.parse_args()
     if args.track not in ('test','random') and not args.track.isdigit(): parser.error("--track must be 'test', 'random' or a number")
     config=build_config()
     if args.replay: return replay(args.replay, config, args.track)
-    app=App(ROOT/'neat_config.txt', headless=args.headless)
-    if args.headless: print('Headless training. Press Ctrl+C to stop.')
+    app=App(ROOT/'neat_config.txt', headless=args.headless, workers=max(1,args.workers))
+    if args.headless: print(f'Headless training with {max(1,args.workers)} worker process(es). Press Ctrl+C to stop.')
     if args.resume:
         pop=neat.Checkpointer.restore_checkpoint(args.resume)
         print(f'Resumed NEAT population from {args.resume}')
@@ -410,6 +413,7 @@ def main():
     try: pop.run(lambda genomes,cfg: eval_genomes(genomes,cfg,app), 1000)
     except KeyboardInterrupt: print('\nSimulation stopped. Checkpoints and training outputs are in ./training')
     finally:
+        if app.pool: app.pool.terminate()
         save_stats(app.history); pygame.quit()
 
 if __name__=='__main__': main()
