@@ -2,14 +2,11 @@
 Run: python main.py
 """
 from __future__ import annotations
-import math, os, pickle, csv, time, argparse, random
+import math, os, pickle, csv, time, argparse, random, functools
 from pathlib import Path
 import pygame
 import neat
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / 'training'
@@ -232,6 +229,8 @@ def draw_network(screen, genome, config, rect, font):
 
 
 def save_stats(history):
+    import matplotlib; matplotlib.use('Agg')   # imported lazily; only needed when saving plots
+    import matplotlib.pyplot as plt
     with open(OUT/'fitness_history.csv','w',newline='') as f:
         writer=csv.writer(f); writer.writerow(['generation','best_fitness','mean_fitness','test_fitness','test_result']); writer.writerows(history)
     if history:
@@ -264,28 +263,45 @@ def drive(car):
     return car
 
 
+cached_track = functools.lru_cache(maxsize=8)(random_track)   # build each generation's tracks once, not per genome
+
+
+def run_genome(genome, config, seeds):
+    # Headless evaluation of one genome on the given random tracks: (average fitness, finish times).
+    net=neat.nn.FeedForwardNetwork.create(genome,config)
+    cars=[drive(Car(0,genome,net,cached_track(seed))) for seed in seeds]
+    return sum(c.fitness for c in cars)/len(cars), [c.age/60 for c in cars if c.finished]
+
+
 def eval_genomes(genomes, config, app):
     app.generation += 1
-    nets={gid: neat.nn.FeedForwardNetwork.create(genome,config) for gid,genome in genomes}
-    totals={gid: 0.0 for gid,_ in genomes}; finished=[]
     # Every genome drives the same fresh random tracks, so it can't just memorise one layout.
-    for i in range(TRACKS_PER_GEN):
-        app.track=random_track(app.rng.randrange(10**6)); app.track_info=f'{i+1}/{TRACKS_PER_GEN} {app.track.name}'
-        cars=[Car(gid,genome,nets[gid],app.track) for gid,genome in genomes]
-        while any(c.alive for c in cars) and app.running:
-            app.clock.tick(FPS)
-            handle_events(app)
-            if not app.paused:
-                for c in cars: c.update()
-            app.draw(cars,config)
-        if not app.running: raise KeyboardInterrupt
-        for c in cars: totals[c.genome_id]+=c.fitness
-        finished+=[c.age/60 for c in cars if c.finished]
-    for gid,genome in genomes: genome.fitness=totals[gid]/TRACKS_PER_GEN
+    seeds=[app.rng.randrange(10**6) for _ in range(TRACKS_PER_GEN)]
+    finished=[]
+    if app.headless:
+        jobs=[(genome,config,seeds) for _,genome in genomes]
+        results=[run_genome(*job) for job in jobs]
+        for (_,genome),(fitness,times) in zip(genomes,results): genome.fitness=fitness; finished+=times
+    else:
+        nets={gid: neat.nn.FeedForwardNetwork.create(genome,config) for gid,genome in genomes}
+        totals={gid: 0.0 for gid,_ in genomes}
+        for i,seed in enumerate(seeds):
+            app.track=random_track(seed); app.track_info=f'{i+1}/{TRACKS_PER_GEN} {app.track.name}'
+            cars=[Car(gid,genome,nets[gid],app.track) for gid,genome in genomes]
+            while any(c.alive for c in cars) and app.running:
+                app.clock.tick(FPS)
+                handle_events(app)
+                if not app.paused:
+                    for c in cars: c.update()
+                app.draw(cars,config)
+            if not app.running: raise KeyboardInterrupt
+            for c in cars: totals[c.genome_id]+=c.fitness
+            finished+=[c.age/60 for c in cars if c.finished]
+        for gid,genome in genomes: genome.fitness=totals[gid]/TRACKS_PER_GEN
     best_gid,best=max(genomes,key=lambda g:g[1].fitness)
     mean=float(np.mean([g.fitness for _,g in genomes]))
     # Generalisation check on the hand-made track that training never sees.
-    test=drive(Car(best_gid,best,nets[best_gid],app.test_track))
+    test=drive(Car(best_gid,best,neat.nn.FeedForwardNetwork.create(best,config),app.test_track))
     app.last_test=test.result()
     if app.best_genome is None or test.fitness>app.best_test:
         app.best_test=test.fitness; app.best_test_result=test.result(); app.best_genome=best
@@ -297,9 +313,11 @@ def eval_genomes(genomes, config, app):
 
 
 class App:
-    def __init__(self, config_path):
-        pygame.init(); pygame.display.set_caption('NeuroEvolution • Self-Driving Lab')
-        self.screen=pygame.display.set_mode((W,H)); self.clock=pygame.time.Clock(); self.font=pygame.font.SysFont('consolas',16); self.big=pygame.font.SysFont('consolas',22,bold=True)
+    def __init__(self, config_path, headless=False):
+        self.headless=headless
+        if not headless:
+            pygame.init(); pygame.display.set_caption('NeuroEvolution • Self-Driving Lab')
+            self.screen=pygame.display.set_mode((W,H)); self.clock=pygame.time.Clock(); self.font=pygame.font.SysFont('consolas',16); self.big=pygame.font.SysFont('consolas',22,bold=True)
         self.running=True; self.paused=False; self.show_sensors=False; self.generation=0; self.best_genome=None; self.history=[]
         self.config_path=config_path; self.replay=False; self.rng=random.Random()
         self.test_track=Track(TEST_TRACK_POINTS,'test track'); self.track=self.test_track; self.track_info=''
@@ -375,11 +393,13 @@ def main():
                         help='Watch a saved genome drive (default: training/best_genome.pkl)')
     parser.add_argument('--track', type=str, default='test',
                         help="Replay track: 'test' (default), 'random' (new track every run) or a number for a specific random track")
+    parser.add_argument('--headless', action='store_true', help='Train without a window or frame cap (much faster)')
     args=parser.parse_args()
     if args.track not in ('test','random') and not args.track.isdigit(): parser.error("--track must be 'test', 'random' or a number")
     config=build_config()
     if args.replay: return replay(args.replay, config, args.track)
-    app=App(ROOT/'neat_config.txt')
+    app=App(ROOT/'neat_config.txt', headless=args.headless)
+    if args.headless: print('Headless training. Press Ctrl+C to stop.')
     if args.resume:
         pop=neat.Checkpointer.restore_checkpoint(args.resume)
         print(f'Resumed NEAT population from {args.resume}')
