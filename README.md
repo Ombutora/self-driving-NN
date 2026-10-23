@@ -38,6 +38,8 @@ Lower `STEER_RESPONSE` or raise `SENSOR_NOISE` to make driving harder.
 ### Performance
 Sensors cast rays over a precomputed road mask (a boolean pixel grid) with numpy, so all 60 cars × 7 sensors are cheap each frame. The track image is rendered once and reused.
 
+In the window, training runs at 60 FPS so you can watch, which is about a minute per generation. For long runs, use **headless mode** (below), which skips drawing and the frame cap and shares the cars across CPU cores.
+
 ## Setup (Windows PowerShell)
 
 ```powershell
@@ -52,6 +54,18 @@ python main.py
 If PowerShell blocks activation, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that terminal, then activate again.
 
 On macOS/Linux use `python3 -m venv .venv` and `source .venv/bin/activate`.
+
+## Fast headless training
+
+```powershell
+python main.py --headless                    # no window, uses every CPU core
+python main.py --headless --workers 2        # limit the number of worker processes
+python main.py --headless --resume training/neat-checkpoint-235
+```
+
+Each generation's genomes are split across worker processes. Every worker builds the same random tracks from shared seeds, so all genomes still race identical tracks. Progress prints to the console, checkpoints, `best_genome.pkl` and the fitness history are saved exactly as in window mode, and `Ctrl+C` stops it. Watch the result afterwards with `--replay`.
+
+On a 4-thread laptop CPU, a generation took about 7–17 s headless with 4 workers and about 15 s with 1 worker, against about 65 s in the window. Each worker process uses about 40 MB of RAM and the main process about 70 MB, so lower `--workers` if memory is tight.
 
 ## Controls
 
@@ -83,7 +97,7 @@ Everything is written to `neural-driving/training/` (git-ignored):
 
 | File | Contents |
 |---|---|
-| `neat-checkpoint-N` | Full NEAT population, saved every 5 generations and every 5 minutes |
+| `neat-checkpoint-N` | Full NEAT population, saved every 5 generations and every 5 minutes. Window and headless checkpoints are interchangeable |
 | `best_genome.pkl` | The genome with the best test-track score so far (a single network, not a resumable population) |
 | `fitness_history.csv` / `.png` | Per generation: best and mean fitness on the training tracks, plus the best genome's test-track fitness and result (time, or where it crashed) |
 
